@@ -42,7 +42,7 @@ struct Queue* createQueue() {
     queue->capacity = 20;
     queue->front = queue->size = 0;
     queue->rear = 19;
-    queue->array = (int*)malloc(queue->capacity * sizeof(int));
+    queue->array = (struct waitingProc*)malloc(queue->capacity * sizeof(struct waitingProc));
     return queue;
 }
 
@@ -53,17 +53,17 @@ int isFull(struct Queue* queue) { return (queue->size == queue->capacity); }
 int isEmpty(struct Queue* queue) { return (queue->size == 0); }
 
 // adds item to rear of queue
-void enqueue(struct Queue* queue, int item) {
-    if (isFull(queue)) { return; }
+void enqueue(struct Queue* queue, struct waitingProc item) {
+    //if (isFull(queue)) { return; }
     queue->rear = (queue->rear + 1) % queue->capacity;
     queue->array[queue->rear] = item;
     queue->size = queue->size + 1;
 }
 
 // removes item from front of queue
-int dequeue(struct Queue* queue) {
-    if (isEmpty(queue)) { return INT_MIN; }
-    int item = queue->array[queue->front];
+struct waitingProc dequeue(struct Queue* queue) {
+    //if (isEmpty(queue)) { return INT_MIN; }
+    struct waitingProc item = queue->array[queue->front];
     queue->front = (queue->front + 1) % queue->capacity;
     queue->size = queue->size - 1;
     return item;

@@ -9,6 +9,7 @@
 #include <string.h>
 #include <time.h>
 #include <math.h>
+#include <stdbool.h>
 #include <sys/time.h>
 #include <sys/ipc.h> 
 #include <sys/shm.h> 
@@ -59,7 +60,7 @@ void terminateOSS() {
 	fclose(fp);
 	for (i = 0; i < currentChildren; i++) { mWait(&status); }
 	if (msgctl(msqid, IPC_RMID, NULL) == -1) { perror("oss: msgctl"); }
-    if (semctl(semid, 0, IPC_RMID, 0) == -1) { perror("\nCan't RPC_RMID."); }
+    if (semctl(semid, 0, IPC_RMID, 0) == -1) { perror("Can't RPC_RMID."); }
 	if (shmdt(shmptr) == -1) { perror("oss: Error"); }
 	if (shmctl(shmid, IPC_RMID, 0) == -1) {
 		perror("oss: Error");
@@ -77,8 +78,8 @@ void setupFile() {
 	if (fp == NULL) { perror("oss: Error"); }
 }
 
-// sends message to stderr, kills all processes in this process group, which is 
-// ignored by parent, then zeros out procMax so no new processes are spawned
+// sends message to stderr, then kills all processes in this process group, which is 
+// ignored by parent
 static void interruptHandler(int s) {
 	fprintf(stderr, "\nInterrupt recieved.\n");
 	signal(SIGQUIT, SIG_IGN);
@@ -106,7 +107,7 @@ static int setupSIGINT(void) {
 
 // sets ups itimer with time of 3s and interval of 0s
 static int setupitimer() {
-	struct itimerval value = { {0, 0}, {2, 0} };
+	struct itimerval value = { {0, 0}, {3, 0} };
 	return (setitimer(ITIMER_REAL, &value, NULL));
 }
 
@@ -126,19 +127,114 @@ static int setupInterrupts() {
 	}
 }
 
+// print 2d allocation array as table
+void displayAllocationTable() {
+	int i, j;
+	printf("\nAll");
+	for (i = 0; i < 20; i++) { printf(" R%-2d", i); }
+	printf("\n");
+	for (i = 0; i < 18; i++) {
+		printf("P%-2d", i);
+		for (j = 0; j < 20; j++) { printf("  %-2d", shmptr->allocation[i][j]); }
+		printf("\n");
+	}
+	printf("\n");
+}
+
+bool deadlockDetection(int pid, int rid, int numRequested) {
+	int i, j, p, work[20];
+	bool finish[18];
+
+	for (i = 0; i < 20; i++) { work[i] = shmptr->available[i]; }
+	for (i = 0; i < 20; i++) { finish[i] = (shmptr->PIDmap[i] == 0) ? true : false; }
+	
+	for (p = 0; p < 18; p++) {
+		if (finish[p]) { continue; }
+		for (i = 0; i < 20; i++) { if (shmptr->need[p][i] > work[i]) { break; } }
+		if (i == 20) {
+			finish[p] = true;
+			for (j = 0; j < 20; j++) { work[j] += shmptr->allocation[p][j]; }
+			p = -1;
+		}
+	}
+
+	for (p = 0; p < 18; p++) { if (!finish[p]) { break; } }
+
+	return (p != 18);
+}
+
+enum action bankersAlgorithm(int pid, int rid, int numRequested) {
+	if (numRequested > shmptr->need[pid][rid]) {
+		printf("OSS: error: P%d asked for more than initial max request\n", pid);
+		signal(SIGQUIT, SIG_IGN);
+		kill(-getpid(), SIGQUIT);
+		terminateOSS();
+	}
+	else if (numRequested <= shmptr->available[rid]) {
+		shmptr->available[rid] -= numRequested;
+		shmptr->allocation[pid][rid] += numRequested;
+		shmptr->need[pid][rid] -= numRequested;
+		printf("OSS: Running deadlock detection at %f s\n", timeToDouble(shmptr->currentTime));
+		if (!deadlockDetection(pid, rid, numRequested)) { 
+			printf("\tSafe state after granting request.\n\tRequest by P%d for R%d:%d granted.\n", pid, rid, numRequested);
+			return confirm; 
+		}
+		else {
+			printf("\tUnsafe state after granting request.\n\tRequest by P%d for R%d:%d denied, adding to wait queue.\n", pid, rid, numRequested);
+			shmptr->available[rid] += numRequested;
+			shmptr->allocation[pid][rid] -= numRequested;
+			shmptr->need[pid][rid] += numRequested;
+		}
+	}
+	else { printf("OSS: request by P%d for R%d:%d denied due to lack of available resources, adding to wait queue\n", pid, rid, numRequested); }
+	
+	enqueue(shmptr->descriptors[rid].waitQ, (struct waitingProc) { pid, numRequested });
+	return block;
+}
+
+//////////issues
+void checkWaitQueue(int rid) {
+	int i, flag = 0;
+	struct waitingProc proc;
+	struct msgbuf buf;
+	int numWaiting = shmptr->descriptors[rid].waitQ->size;
+	for (i = 0; i < numWaiting; i++) {
+		//while (!isEmpty(shmptr->descriptors[rid].waitQ)) {
+		proc = dequeue(shmptr->descriptors[rid].waitQ);
+		if (shmptr->PIDmap[proc.pid] == 0) continue;// { flag == 1; break; }
+		//}
+
+		else {
+			if (bankersAlgorithm(proc.pid, rid, proc.numRequested) == confirm) {
+				buf = (struct msgbuf) { proc.pid + 1, 20, rid, proc.numRequested, wake };
+				printf("OSS: waking P%d and granting its request for R%d:%d\n", proc.pid, rid, proc.numRequested);
+				shmptr->currentTime = addTime(shmptr->currentTime, 0, rand() % 100000 + 100000);
+				if (msgsnd(msqid, &buf, sizeof(struct msgbuf), 0) == -1) { perror("oss: Error"); }
+			}
+			//else { enqueue(shmptr->descriptors[rid].waitQ, proc); }
+		}
+	}
+}
+//////////////issues
+
 // handle process termination, adding process's cpu usage, lifetime, and blocked time to cumalative totals, setting PIDmap to 0, and updating counters
 void terminateProc(int pid){
-	int status, i;
+	int status, i, checkArr[20];
+	for (i = 0; i < 20; i++) { checkArr[i] = 0;	}
 	
 	if (semop(semid, &p, 1) < 0) { perror("semop p"); }
+	shmptr->PIDmap[pid] = 0;
 	printf("Receiving that P%d terminated\n\tResources released :", pid);
 	for (i = 0; i < 20; i++) {
-		if (shmptr->allocation[pid][i] > 0) { printf("  R%d:%d  ", i, shmptr->allocation[pid][i]); }
 		shmptr->available[i] += shmptr->allocation[pid][i];
+		if (shmptr->allocation[pid][i] > 0) { 
+			printf("  R%d:%d  ", i, shmptr->allocation[pid][i]);
+			checkArr[i] = 1;
+		}
 		shmptr->allocation[pid][i] = shmptr->maximum[pid][i] = shmptr->need[pid][i] = 0;
 	}
 	printf("\n");
-	shmptr->PIDmap[pid] = 0;
+	for (i = 0; i < 20; i++) { if (checkArr[i] == 1) { checkWaitQueue(i); } }
 	if (semop(semid, &v, 1) < 0) { perror("semop v"); }
 	
 	mWait(&status);
@@ -184,24 +280,10 @@ void spawnChildProc() {
 	}
 }
 
-void displayAllocationTable(){
-	int i, j;
-	if (semop(semid, &p, 1) < 0) { perror("semop p"); }
-	printf("\n   ");
-	for (i = 0; i < 20; i++) { printf(" R%-2d", i); }
-	printf("\n");
-	for (i = 0; i < 18; i++) {
-		printf("P%-2d", i);
-		for (j = 0; j < 20; j++) { printf("  %-2d", shmptr->allocation[i][j]); }
-		printf("\n");
-	}
-	if (semop(semid, &v, 1) < 0) { perror("semop v"); }
-}
-
 // spawns and schedules children according to multi-level feedback algorithm, keeping track of statistics
 int main(int argc, char* argv[]) {
 	int randomWait, i, j, numGranted, opt;
-	const int PROCMAX = 5;
+	const int PROCMAX = 40;
 	const int SHAREABLE_RATIO = rand() % 11 + 15;
 	struct msgbuf buf;
 
@@ -215,20 +297,16 @@ int main(int argc, char* argv[]) {
 	srand(time(0));
 
 	// parses command line arguments
-    while ((opt = getopt(argc, argv, "v")) != -1) {
-        if (opt == 'v') { vFlag = 1; }
-	}
+    while ((opt = getopt(argc, argv, "v")) != -1) { if (opt == 'v') { vFlag = 1; } }
 
 	for (i = 0; i < 20; i++) {
 		shmptr->descriptors[i] = (struct resourceDescriptor) { nonshareable, rand() % 10 + 1, createQueue() };
-		if (rand() % 100 < SHAREABLE_RATIO) { shmptr->descriptors[i].rClass = shareable; }
+		if (rand() % 100 < SHAREABLE_RATIO) { shmptr->descriptors[i].rType = shareable; }
 		shmptr->available[i] = shmptr->descriptors[i].instances;
 	}
 
 	for (i = 0; i < 18; i++) {
-		for (j = 0; j < 20; j++) {
-			shmptr->allocation[i][j] = shmptr->maximum[i][j] = shmptr->need[i][j] = 0;
-		}
+		for (j = 0; j < 20; j++) { shmptr->allocation[i][j] = shmptr->maximum[i][j] = shmptr->need[i][j] = 0; }
 	}
 
 	// initialize PIDmap and currentTime
@@ -239,49 +317,47 @@ int main(int argc, char* argv[]) {
 	while (totalProcs < PROCMAX || currentChildren > 0) {
 		randomWait = rand() % (BILLION / 2 - 1000) + 1000;
 
-		// decrements the semaphore
 		if (semop(semid, &p, 1) < 0) { perror("semop p"); }
-		// updates shared clock
 		shmptr->currentTime = addTime(shmptr->currentTime, 0, randomWait);
-		// increments the semaphore
     	if (semop(semid, &v, 1) < 0) { perror("semop v"); }
 
 		// spawns new process if process table isn't full and PROCMAX hasn't been reached
 		if (currentChildren < 18 && totalProcs < PROCMAX) { spawnChildProc(); }
 
 		if (msgrcv(msqid, &buf, sizeof(struct msgbuf), 20, IPC_NOWAIT) >= 0) {
-			 //perror("user_proc: Error");
 			if (buf.act == terminate) { terminateProc(buf.pid); }
 			else if (buf.act == release) {
 				if (semop(semid, &p, 1) < 0) { perror("semop p"); }
 				printf("Receiving that P%d is releasing %d instance(s) of R%d\n", buf.pid, buf.instances, buf.resource);
 				shmptr->allocation[buf.pid][buf.resource] -= buf.instances;
-				shmptr->need[buf.pid][buf.resource] += buf.instances;
 				shmptr->available[buf.resource] += buf.instances;
+				checkWaitQueue(buf.resource);
 				if (semop(semid, &v, 1) < 0) { perror("semop v"); }
 				
 				buf.type = buf.pid + 1;
 				buf.pid = 20;
 				buf.act = confirm;
-				if (msgsnd(msqid, &buf, sizeof(struct msgbuf), 0) == -1) { perror("user_proc: Error"); }
+				if (msgsnd(msqid, &buf, sizeof(struct msgbuf), 0) == -1) { perror("oss: Error"); }
 			}
 			else if (buf.act == request) {
 				if (semop(semid, &p, 1) < 0) { perror("semop p"); }
 				printf("Receiving that P%d is requesting %d instance(s) of R%d\n", buf.pid, buf.instances, buf.resource);
-				shmptr->allocation[buf.pid][buf.resource] += buf.instances;
-				shmptr->need[buf.pid][buf.resource] -= buf.instances;
-				shmptr->available[buf.resource] -= buf.instances;
+				buf.act = bankersAlgorithm(buf.pid, buf.resource, buf.instances);
 				if (semop(semid, &v, 1) < 0) { perror("semop v"); }
 
 				buf.type = buf.pid + 1;
 				buf.pid = 20;
-				buf.act = confirm;
-				numGranted++;
-				if (numGranted >= 5) {
-					displayAllocationTable();
-					numGranted = 0;
+				if (buf.act == confirm) {
+					numGranted++;
+					if (numGranted >= 20) {
+						if (semop(semid, &p, 1) < 0) { perror("semop p"); }
+						displayAllocationTable();
+						if (semop(semid, &v, 1) < 0) { perror("semop v"); }
+						numGranted = 0;
+					}
 				}
-				if (msgsnd(msqid, &buf, sizeof(struct msgbuf), 0) == -1) { perror("user_proc: Error"); }
+
+				if (msgsnd(msqid, &buf, sizeof(struct msgbuf), 0) == -1) { perror("oss: Error"); }
 			}
 		}
 	}

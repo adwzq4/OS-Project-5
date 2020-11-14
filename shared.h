@@ -9,11 +9,10 @@
 #define BILLION 1000000000
 
 // resource classes
-enum resourceClass { shareable, nonshareable };
+enum resourceType { shareable, nonshareable };
 
+// process actions
 enum action { request, confirm, release, terminate, block, wake };
-// // process states
-// enum procState { run, ready, blocked, terminated };
 
 // declare semaphore union
 union semun {
@@ -46,8 +45,9 @@ struct msgbuf {
 	enum action act;
 };
 
+// holds info about resource class
 struct resourceDescriptor {
-	enum resourceClass rClass;
+	enum resourceType rType;
 	int instances;
 	struct Queue* waitQ;
 };
@@ -63,11 +63,17 @@ struct shmseg {
 	int PIDmap[18];
 };
 
+// queue holds structs consisting of pid and the quantity of a resource request
+struct waitingProc {
+	int pid;
+	int numRequested;
+};
+
 // queue struct
 struct Queue {
     int front, rear, size;
     int capacity;
-    int* array;
+    struct waitingProc* array;
 };
 
 void mWait(int*);
@@ -77,7 +83,7 @@ double timeToDouble(struct mtime);
 struct Queue* createQueue();
 int isFull(struct Queue*);
 int isEmpty(struct Queue*);
-void enqueue(struct Queue*, int);
-int dequeue(struct Queue*);
+void enqueue(struct Queue*, struct waitingProc);
+struct waitingProc dequeue(struct Queue*);
 int front(struct Queue*);
 int rear(struct Queue*);

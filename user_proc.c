@@ -19,6 +19,7 @@ union semun sem;
 struct sembuf p = { 0, -1, SEM_UNDO };
 struct sembuf v = { 0, +1, SEM_UNDO };
 struct shmseg* shmptr;
+int lines;
 
 void attachToSharedMemory(){
 	key_t shmkey, msqkey, semkey;
@@ -43,8 +44,6 @@ void attachToSharedMemory(){
     semkey = ftok("oss", 484);
     semid = semget(semkey, 1, 0666 | IPC_CREAT);
     if (semid < 0) { perror("semget"); }
-    
-	// initialize semaphore to have counter value of 1
 	// sem.val = 1;
     // if (semctl(semid, 0, SETVAL, sem) < 0) { perror("semctl"); }
 }
@@ -56,6 +55,7 @@ int main(int argc, char* argv[]) {
 	struct mtime terminateOK;
 	int i, j, pid, term;
 	const int TERMRATIO = 5;
+	lines = 0;
 	
 	// get pid from execl parameter
 	pid = atoi(argv[0]);
@@ -97,18 +97,15 @@ int main(int argc, char* argv[]) {
 					if (shmptr->allocation[pid][i] > 0) j++;
 					if (j != r) i++;
 				}
-				//i = rand() % 20;
 				buf.resource = i;
 				buf.instances = rand() % shmptr->allocation[pid][i] + 1;
 				if (semop(semid, &v, 1) < 0) { perror("semop v"); }
 
 				if (msgsnd(msqid, &buf, sizeof(struct msgbuf), 0) == -1) { perror("user_proc: Error"); }
-
 				if (msgrcv(msqid, &buf, sizeof(struct msgbuf), pid + 1, 0) == -1) { perror("user_proc: Error"); }	
 				
 				if (semop(semid, &p, 1) < 0) { perror("semop p"); }
 				if (buf.act == confirm) { printf("user_proc: release by P%d confirmed\n", pid); }
-				//updates shared clock, protect critical resource with semphore
 				shmptr->currentTime = addTime(shmptr->currentTime, 0, rand() % 10000 + 5000);
 				if (semop(semid, &v, 1) < 0) { perror("semop v"); }
 			}
@@ -128,20 +125,31 @@ int main(int argc, char* argv[]) {
 					if (shmptr->need[pid][i] > 0) j++;
 					if (j != r) i++;
 				}
-				//i = rand() % 20;
 				buf.resource = i;
 				buf.instances = rand() % shmptr->need[pid][i] + 1;
 				if (semop(semid, &v, 1) < 0) { perror("semop v"); }
 
 				if (msgsnd(msqid, &buf, sizeof(struct msgbuf), 0) == -1) { perror("user_proc: Error"); }
+				
 				if (msgrcv(msqid, &buf, sizeof(struct msgbuf), pid + 1, 0) == -1) { perror("user_proc: Error"); }
 				
-				if (semop(semid, &p, 1) < 0) { perror("semop p"); }
-				if (buf.act == confirm) { printf("user_proc: request by P%d granted\n", pid); }
-				else if (buf.act == block) { printf("user_proc: request by P%d denied\n", pid);	}
-				//updates shared clock, protect critical resource with semphore
-				shmptr->currentTime = addTime(shmptr->currentTime, 0, rand() % 5000 + 5000);
-				if (semop(semid, &v, 1) < 0) { perror("semop v"); }
+				if (buf.act == confirm) {
+					if (semop(semid, &p, 1) < 0) { perror("semop p"); }
+					printf("user_proc: request by P%d granted\n", pid);
+					shmptr->currentTime = addTime(shmptr->currentTime, 0, rand() % 5000 + 5000);
+					if (semop(semid, &v, 1) < 0) { perror("semop v"); }
+				}
+
+				else if (buf.act == block) { 
+					if (semop(semid, &p, 1) < 0) { perror("semop p"); }
+					printf("user_proc: request by P%d denied, waiting on R%d:%d \n", pid, buf.resource, buf.instances);
+					shmptr->currentTime = addTime(shmptr->currentTime, 0, rand() % 5000 + 5000);
+					if (semop(semid, &v, 1) < 0) { perror("semop v"); }					
+					while (buf.act != wake) {
+						if (msgrcv(msqid, &buf, sizeof(struct msgbuf), pid + 1, 0) == -1) { if (lines < 50) {perror("user_proc: Error"); lines++;}}
+					}
+					printf("user_proc: P%d woke up\n", pid);
+				}
 			}
 			else if (semop(semid, &v, 1) < 0) { perror("semop v"); }
 		}
