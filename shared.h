@@ -12,7 +12,7 @@
 enum resourceType { shareable, nonshareable };
 
 // process actions
-enum action { request, confirm, release, terminate, block, wake };
+enum action { request, confirm, deny, release, terminate, block, wake };
 
 // declare semaphore union
 union semun {
@@ -29,11 +29,12 @@ struct mtime {
 
 // holds cumulative statistics
 struct statistics {
-	//struct mtime lifetime;
-	struct mtime active;
-	//struct mtime timeBlocked;
-	//struct mtime OSactive;
-	//int numComplete;
+	struct mtime lifeTime;
+	struct mtime waitTime;
+	int numComplete;
+	int requestsGranted;
+	int requestsDenied;
+	int numAllocated;
 };
 
 // holds message contents/info
@@ -69,7 +70,7 @@ struct waitingProc {
 	int numRequested;
 };
 
-// queue struct
+// queue struct to holding waitingProc structs
 struct Queue {
     int front, rear, size;
     int capacity;
