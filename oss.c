@@ -1,5 +1,5 @@
 // Author: Adam Wilson
-// Date: 10/2/2020
+// Date: 11/17/2020
 
 #include <unistd.h>
 #include <errno.h>
@@ -8,7 +8,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
-#include <math.h>
 #include <stdbool.h>
 #include <sys/time.h>
 #include <sys/ipc.h> 
@@ -20,25 +19,27 @@
 
 // intra-file globals
 FILE* fp;
-int msqid, shmid, semid, currentChildren, totalProcs, lastPID, vFlag;
+int msqid, shmid, semid, currentChildren, totalProcs, lastPID, vFlag, lines;
 union semun sem;
 struct sembuf p = { 0, -1, SEM_UNDO };
 struct sembuf v = { 0, +1, SEM_UNDO };
 struct shmseg* shmptr;
-struct statistics stats;
 
 // print 2d allocation array as table
 void displayAllocationTable() {
 	int i, j;
-	printf("\nAll");
-	for (i = 0; i < 20; i++) { printf(" R%-2d", i); }
-	printf("\n");
-	for (i = 0; i < 18; i++) {
-		printf("P%-2d", i);
-		for (j = 0; j < 20; j++) { printf("  %-2d", shmptr->allocation[i][j]); }
-		printf("\n");
+	if (lines < 100000) {
+		fprintf(fp, "\n   ");
+		for (i = 0; i < 20; i++) { fprintf(fp, " R%-2d", i); }
+		fprintf(fp, "\n");
+		for (i = 0; i < 18; i++) {
+			fprintf(fp, "P%-2d", i);
+			for (j = 0; j < 20; j++) { fprintf(fp, "  %-2d", shmptr->allocation[i][j]); }
+			fprintf(fp, "\n");
+		}
+		fprintf(fp, "\n");
+		lines += 21;
 	}
-	printf("\n");
 }
 
 // creates a shared memory segment, a message queue, and a semaphore
@@ -66,18 +67,20 @@ void createMemory() {
 	if (msqid == -1) { perror("oss: Error"); }
 }
 
-// outputs stats, waits for children, destroys message queue, and detaches and destroys shared memory
+// outputs stats, waits for children, destroys message queue and semaphore, and detaches and destroys shared memory
 void terminateOSS() {
 	int i, j, status;
-	printf("\n\nOSS ran for %4f s\n", timeToDouble(shmptr->currentTime));
-	printf("Average requests granted: %3f / process\n", stats.requestsGranted / (double)stats.numComplete);
-	printf("Average requests denied: %3f / process\n", stats.requestsDenied / (double)stats.numComplete);
-	printf("Average resource instances allocated: %3f / process\n", stats.numAllocated / (double)stats.numComplete);
-	// TODO write stats
+	fprintf(fp, "\n\nOSS ran for %.4f s\n", timeToDouble(shmptr->currentTime));
+	fprintf(fp, "Average lifetime: %.3f s / process\n", timeToDouble(shmptr->stats.lifeTime) / shmptr->stats.numComplete);
+	fprintf(fp, "Average sleep time: %.3f s / process\n", timeToDouble(shmptr->stats.waitTime) / shmptr->stats.numComplete);
+	fprintf(fp, "Average requests granted: %.3f / process\n", shmptr->stats.requestsGranted / (double)shmptr->stats.numComplete);
+	fprintf(fp, "Average requests denied: %.3f / process\n", shmptr->stats.requestsDenied / (double)shmptr->stats.numComplete);
+	fprintf(fp, "Average resource instances allocated: %.3f / process\n", shmptr->stats.numAllocated / (double)shmptr->stats.numComplete);
+	fprintf(fp, "Lines of output: %d\n", lines);
 	fclose(fp);
 	for (i = 0; i < currentChildren; i++) { mWait(&status); }
 	if (msgctl(msqid, IPC_RMID, NULL) == -1) { perror("oss: msgctl"); }
-    if (semctl(semid, 0, IPC_RMID, 0) == -1) { perror("Can't RPC_RMID."); }
+    if (semctl(semid, 0, IPC_RMID, 0) == -1) { perror("Can't RPC_RMID"); }
 	if (shmdt(shmptr) == -1) { perror("oss: Error"); }
 	if (shmctl(shmid, IPC_RMID, 0) == -1) {
 		perror("oss: Error");
@@ -97,7 +100,7 @@ void setupFile() {
 
 // sends message to stderr, then kills all processes in this process group, which is ignored by parent
 static void interruptHandler(int s) {
-	fprintf(stderr, "\nInterrupt recieved.\n");
+	fprintf(stderr, "\nInterrupt recieved\n");
 	signal(SIGQUIT, SIG_IGN);
 	kill(-getpid(), SIGQUIT);
 	terminateOSS();
@@ -179,35 +182,53 @@ enum action bankersAlgorithm(int pid, int rid, int numRequested) {
 		shmptr->need[pid][rid] -= numRequested;
 		// if a shareable resource was requested deadlockDetection() needn't be called, and available[] doesn't change
 		if (shmptr->descriptors[rid].rType == shareable) {
-			printf("Granting request for shareable resource R%d:%d\n", rid, numRequested);
-			stats.numAllocated += numRequested;
-			stats.requestsGranted++;
+			if (lines < 100000) {
+				fprintf(fp, "OSS: Granting request for shareable resource R%d:%d\n", rid, numRequested);
+				lines++;
+			}
+			shmptr->stats.numAllocated += numRequested;
+			shmptr->stats.requestsGranted++;
 			return confirm;
 		}
 		shmptr->available[rid] -= numRequested;
-		if (vFlag) printf("OSS: Running deadlock detection at %f s\n", timeToDouble(shmptr->currentTime));
+		if (vFlag && lines < 100000) {
+			fprintf(fp, "OSS: Running deadlock detection at %f s\n", timeToDouble(shmptr->currentTime));
+			lines++;
+		} 
 		
 		// if no deadlock, just return confirm, otherwise roll back hypothetical grant
 		if (!deadlockDetection(pid, rid, numRequested)) { 
-			if (vFlag) printf("\tSafe state after granting request.\n\t");
-			else printf("OSS: ");
-			printf("Request by P%d for R%d:%d granted.\n", pid, rid, numRequested);
-			stats.numAllocated += numRequested;
-			stats.requestsGranted++;
+			if (lines < 100000) {
+				if (vFlag) {
+					fprintf(fp, "\tSafe state after granting request\n\t");
+					lines++;
+				}
+				else fprintf(fp, "OSS: ");
+				fprintf(fp, "Request by P%d for R%d:%d granted\n", pid, rid, numRequested);
+				lines++;
+			}
+			shmptr->stats.numAllocated += numRequested;
+			shmptr->stats.requestsGranted++;
+			// displays allocation table every 20 times a request is granted
+			if (shmptr->stats.requestsGranted % 20 == 0) { displayAllocationTable(); }
 			return confirm; 
 		}
 		else {
-			if (vFlag) {
-				printf("\tUnsafe state after granting request.\n\tRequest by P%d for R%d:%d denied, adding to wait queue.\n", pid, rid, numRequested);
+			if (vFlag && lines < 100000) {
+				fprintf(fp, "\tUnsafe state after granting request.\n\tRequest by P%d for R%d:%d denied, adding to wait queue\n", pid, rid, numRequested);
+				lines++;
 			}
 			shmptr->available[rid] += numRequested;
 			shmptr->allocation[pid][rid] -= numRequested;
 			shmptr->need[pid][rid] += numRequested;
 		}
 	}
-	else if (vFlag) { printf("OSS: request by P%d for R%d:%d denied due to lack of available resources, adding to wait queue\n", pid, rid, numRequested); }
+	else if (vFlag && lines < 100000) { 
+		fprintf(fp, "OSS: Request by P%d for R%d:%d denied due to lack of available resources, adding to wait queue\n", pid, rid, numRequested); 
+		lines++;	
+	}
 
-	stats.requestsDenied++;	
+	shmptr->stats.requestsDenied++;	
 	// add process/numRequested to the wait queue for this resource class, then return block
 	enqueue(shmptr->descriptors[rid].waitQ, (struct waitingProc) { pid, numRequested });
 	return block;
@@ -224,7 +245,10 @@ void checkWaitQueue(int rid) {
 		proc = dequeue(shmptr->descriptors[rid].waitQ);
 		if (bankersAlgorithm(proc.pid, rid, proc.numRequested) == confirm) {
 			buf = (struct msgbuf) { proc.pid + 1, 20, rid, proc.numRequested, wake };
-			printf("OSS: waking P%d and granting its request for R%d:%d\n", proc.pid, rid, proc.numRequested);
+			if (lines < 100000) {
+				fprintf(fp, "\tWaking P%d\n", proc.pid);
+				lines++;
+			}
 			shmptr->currentTime = addTime(shmptr->currentTime, 0, rand() % 100000 + 100000);
 			if (msgsnd(msqid, &buf, sizeof(struct msgbuf), 0) == -1) { perror("oss: Error"); }
 		}
@@ -238,16 +262,22 @@ void terminateProc(int pid){
 	
 	if (semop(semid, &p, 1) < 0) { perror("semop p"); }
 	shmptr->PIDmap[pid] = 0;
-	stats.numComplete++;
-	if (vFlag) printf("Receiving that P%d terminated\n\tResources released :", pid);
+	shmptr->stats.numComplete++;
+	if (vFlag && lines < 100000) {
+		fprintf(fp, "OSS: Receiving that P%d terminated\n\tResources released :", pid);
+		lines++;
+	}
 	for (i = 0; i < 20; i++) {
 		if (shmptr->descriptors[i].rType == nonshareable) { shmptr->available[i] += shmptr->allocation[pid][i]; }
-		if (vFlag && shmptr->allocation[pid][i] > 0) { 
-			printf("  R%d:%d  ", i, shmptr->allocation[pid][i]);
+		if (vFlag && lines < 100000 && shmptr->allocation[pid][i] > 0) { 
+			fprintf(fp, "  R%d:%d  ", i, shmptr->allocation[pid][i]);
 		}
 		shmptr->allocation[pid][i] = shmptr->maximum[pid][i] = shmptr->need[pid][i] = 0;
 	}
-	if (vFlag) printf("\n");
+	if (vFlag && lines < 100000) { 
+		fprintf(fp, "\n");
+		lines++;
+	}
 	for (i = 0; i < 20; i++) checkWaitQueue(i);
 	if (semop(semid, &v, 1) < 0) { perror("semop v"); }
 	
@@ -291,26 +321,29 @@ void spawnChildProc() {
 	else { 
 		if (semop(semid, &p, 1) < 0) { perror("semop p"); }
 		shmptr->currentTime = addTime(shmptr->currentTime, 0, rand() % 10000 + 10000);
-		if (vFlag) printf("OSS: generating P%d at time %f s\n", i, timeToDouble(shmptr->currentTime));
+		if (vFlag && lines < 100000) {
+			fprintf(fp, "OSS: generating P%d at time %f s\n", i, timeToDouble(shmptr->currentTime));
+			lines++;
+		}
 		if (semop(semid, &v, 1) < 0) { perror("semop v"); }
 	}
 }
 
 // spawns and schedules children according to multi-level feedback algorithm, keeping track of statistics
 int main(int argc, char* argv[]) {
-	int randomWait, i, j, numGranted, opt;
+	int randomWait, i, j, opt;
 	const int PROCMAX = 40;
 	const int SHAREABLE_RATIO = rand() % 11 + 15;
 	struct msgbuf buf;
 
 	// initialize globals, interrupts, file pointer, and shared memory
-	stats = (struct statistics) { { 0, 0 }, { 0, 0 }, 0, 0, 0, 0 };
-	currentChildren = totalProcs = numGranted = vFlag = 0;
+	currentChildren = totalProcs = vFlag = lines = 0;
 	lastPID = -1;
 	setupInterrupts();
 	createMemory();
 	setupFile();
 	srand(time(0));
+	shmptr->stats = (struct statistics) { { 0, 0 }, { 0, 0 }, 0, 0, 0, 0 };
 
 	// parses command line arguments
     while ((opt = getopt(argc, argv, "v")) != -1) { if (opt == 'v') { vFlag = 1; } }
@@ -350,8 +383,9 @@ int main(int argc, char* argv[]) {
 			// handles release of resources, updating allocation[][] and, if nonshareable, available[], then calls checkWaitQueue()
 			else if (buf.act == release) {
 				if (semop(semid, &p, 1) < 0) { perror("semop p"); }
-				if (vFlag) {
-					printf("Receiving that P%d is releasing %d instance(s) of R%d\n", buf.pid, buf.instances, buf.resource);
+				if (vFlag && lines < 100000) {
+					fprintf(fp, "Receiving that P%d is releasing %d instance(s) of R%d\n", buf.pid, buf.instances, buf.resource);
+					lines++;
 				}
 				shmptr->allocation[buf.pid][buf.resource] -= buf.instances;
 				if (shmptr->descriptors[buf.resource].rType == nonshareable) {shmptr->available[buf.resource] += buf.instances; }
@@ -368,29 +402,21 @@ int main(int argc, char* argv[]) {
 			// with either confirm or block, depending on the result
 			else if (buf.act == request) {
 				if (semop(semid, &p, 1) < 0) { perror("semop p"); }
-				printf("OSS: Receiving that P%d is requesting %d instance(s) of R%d\n", buf.pid, buf.instances, buf.resource);
+				if (lines < 100000) {
+					fprintf(fp, "OSS: Receiving that P%d is requesting %d instance(s) of R%d\n", buf.pid, buf.instances, buf.resource);
+					lines++;
+				}
 				buf.act = bankersAlgorithm(buf.pid, buf.resource, buf.instances);
 				if (semop(semid, &v, 1) < 0) { perror("semop v"); }
 
 				buf.type = buf.pid + 1;
 				buf.pid = 20;
-				// displays allocation table every 20 times a request is granted
-				if (buf.act == confirm) {
-					numGranted++;
-					if (numGranted >= 20) {
-						if (semop(semid, &p, 1) < 0) { perror("semop p"); }
-						displayAllocationTable();
-						if (semop(semid, &v, 1) < 0) { perror("semop v"); }
-						numGranted = 0;
-					}
-				}
-
 				if (msgsnd(msqid, &buf, sizeof(struct msgbuf), 0) == -1) { perror("oss: Error"); }
 			}
 		}
 	}
 
 	// finish up
-	printf("\nOSS: 40 processes have been spawned and run to completion, now terminating OSS.\n");
+	printf("\nOSS: 40 processes have been spawned and run to completion, now terminating OSS\n");
 	terminateOSS();
 }

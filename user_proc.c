@@ -1,5 +1,5 @@
 // Author: Adam Wilson
-// Date: 10/2/2020
+// Date: 11/17/2020
 
 #include <unistd.h>
 #include <errno.h>
@@ -19,7 +19,6 @@ union semun sem;
 struct sembuf p = { 0, -1, SEM_UNDO };
 struct sembuf v = { 0, +1, SEM_UNDO };
 struct shmseg* shmptr;
-int lines;
 
 void attachToSharedMemory(){
 	key_t shmkey, msqkey, semkey;
@@ -49,19 +48,15 @@ void attachToSharedMemory(){
 // simulates an instance of either a user or real time process spawned by OSS
 int main(int argc, char* argv[]) {
 	struct msgbuf buf;
-	struct mtime waitTil;
-	struct mtime terminateOK;
-	struct mtime initTime;
+	struct mtime waitTil, terminateOK, initTime, blockTime, waiting = {0, 0};
 	int i, j, pid, term;
-	const int TERMRATIO = 10;
-	lines = 0;
+	const int TERMRATIO = 15;
 	
 	// get pid from execl parameter and set up shared memory/semaphore/message queue
 	pid = atoi(argv[0]);
 	attachToSharedMemory();
 	srand(pid * shmptr->currentTime.ns);
-	
-	//initTime = shmptr->currentTime;
+	initTime = shmptr->currentTime;
 	terminateOK = addTime(shmptr->currentTime, 1, 0);
 
 	// initialize the max need for each resource to a random number [0, resource instances], and set need to max
@@ -80,7 +75,7 @@ int main(int argc, char* argv[]) {
 		waitTil = addTime(shmptr->currentTime, 0, rand() % (BILLION / 4));
 		while (!compareTimes(shmptr->currentTime, waitTil));
 
-		// if more than 1 second has passed, then 1/5 of the time the process will terminate
+		// if more than 1 second has passed, then 1/15 of the time the process will terminate
 		if (compareTimes(shmptr->currentTime, terminateOK) && rand() % TERMRATIO == TERMRATIO - 1) {
 			buf.act = terminate;
 			buf.resource = buf.instances = 0;
@@ -88,12 +83,12 @@ int main(int argc, char* argv[]) {
 			break;
 		}
 
-		// 1/4 of the time, releases a random resource (if any are allocated to this process)
-		if (rand() % 4 == 0) {
+		// 1/3 of the time, releases a random resource (if any are allocated to this process)
+		if (rand() % 3 == 0) {
 			buf.act = release;
 			int classes = 0;
 			if (semop(semid, &p, 1) < 0) { perror("semop p"); }
-			// picks random resource class from those that are allocated
+			// picks random resource class and random number of instances from those that are allocated
 			for (i = 0; i < 20; i++) { if (shmptr->allocation[pid][i] > 0) classes++; }
 			if (classes > 0) {
 				int r = rand() % classes + 1;
@@ -105,27 +100,27 @@ int main(int argc, char* argv[]) {
 				buf.resource = i;
 				buf.instances = rand() % shmptr->allocation[pid][i] + 1;
 				if (semop(semid, &v, 1) < 0) { perror("semop v"); }
+				
 				// sends a message to OSS saying it is releasing x instances of resource i
 				if (msgsnd(msqid, &buf, sizeof(struct msgbuf), 0) == -1) { perror("user_proc: Error"); }
-				
 				// waits for a message back confirming the release
 				if (msgrcv(msqid, &buf, sizeof(struct msgbuf), pid + 1, 0) == -1) { perror("user_proc: Error"); }	
 				
 				// updates clock
 				if (semop(semid, &p, 1) < 0) { perror("semop p"); }
-				//if (buf.act == confirm) { printf("user_proc: release by P%d confirmed\n", pid); }
 				shmptr->currentTime = addTime(shmptr->currentTime, 0, rand() % 10000 + 5000);
 				if (semop(semid, &v, 1) < 0) { perror("semop v"); }
 			}
 			else if (semop(semid, &v, 1) < 0) { perror("semop v"); }
 		}
 
+		// otherwise, process sends a message requesting resources
 		else {
 			buf.act = request;
 			int classesNeeded = 0;
 			if (semop(semid, &p, 1) < 0) { perror("semop p"); }
 			for (i = 0; i < 20; i++) { if (shmptr->need[pid][i] > 0) classesNeeded++; }
-			// picks random resource class from those that are needed
+			// picks random resource class and number of instances from those that are needed
 			if (classesNeeded > 0) {
 				int r = rand() % classesNeeded + 1;
 				j = i = 0;
@@ -136,15 +131,15 @@ int main(int argc, char* argv[]) {
 				buf.resource = i;
 				buf.instances = rand() % shmptr->need[pid][i] + 1;
 				if (semop(semid, &v, 1) < 0) { perror("semop v"); }
-
-				if (msgsnd(msqid, &buf, sizeof(struct msgbuf), 0) == -1) { perror("user_proc: Error"); }
 				
+				// sends a message saying it is requesting x instances of resource i
+				if (msgsnd(msqid, &buf, sizeof(struct msgbuf), 0) == -1) { perror("user_proc: Error"); }
+				// waits for a response confirming or blocking the request
 				if (msgrcv(msqid, &buf, sizeof(struct msgbuf), pid + 1, 0) == -1) { perror("user_proc: Error"); }
 				
 				// updates clock
 				if (buf.act == confirm) {
 					if (semop(semid, &p, 1) < 0) { perror("semop p"); }
-					//printf("user_proc: request by P%d granted\n", pid);
 					shmptr->currentTime = addTime(shmptr->currentTime, 0, rand() % 5000 + 5000);
 					if (semop(semid, &v, 1) < 0) { perror("semop v"); }
 				}
@@ -152,18 +147,26 @@ int main(int argc, char* argv[]) {
 				// puts the process into a loop until it receives a message waking it up
 				else if (buf.act == block) { 
 					if (semop(semid, &p, 1) < 0) { perror("semop p"); }
-					//printf("user_proc: request by P%d denied, waiting on R%d:%d \n", pid, buf.resource, buf.instances);
 					shmptr->currentTime = addTime(shmptr->currentTime, 0, rand() % 5000 + 5000);
-					if (semop(semid, &v, 1) < 0) { perror("semop v"); }					
+					if (semop(semid, &v, 1) < 0) { perror("semop v"); }		
+					blockTime = shmptr->currentTime;			
 					while (buf.act != wake) {
-						if (msgrcv(msqid, &buf, sizeof(struct msgbuf), pid + 1, 0) == -1) { if (lines < 50) {perror("user_proc: Error"); lines++;}}
+						if (msgrcv(msqid, &buf, sizeof(struct msgbuf), pid + 1, 0) == -1) { perror("user_proc: Error"); }
 					}
-					//printf("user_proc: P%d woke up\n", pid);
+					blockTime = subtractTime(shmptr->currentTime, blockTime);
+					waiting = addTime(waiting, blockTime.sec, blockTime.ns);
 				}
 			}
 			else if (semop(semid, &v, 1) < 0) { perror("semop v"); }
 		}
 	}
+
+	// updates stats
+	if (semop(semid, &p, 1) < 0) { perror("semop p"); }
+	initTime = subtractTime(shmptr->currentTime, initTime);
+	shmptr->stats.lifeTime = addTime(shmptr->stats.lifeTime, initTime.sec, initTime.ns);
+	shmptr->stats.waitTime = addTime(shmptr->stats.waitTime, waiting.sec, waiting.ns);	
+	if (semop(semid, &v, 1) < 0) { perror("semop v"); }		
 
 	// detaches shmseg from shared memory
 	if (shmdt(shmptr) == -1) {

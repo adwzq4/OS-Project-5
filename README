@@ -1,16 +1,21 @@
+
+
 OSS/user_proc
-	OSS simulates a Linux-like multi-level feedback queue-based schedulering system. It spawns an instance of user_proc every ~0.75s
-on average, up to 18 at a time, initializing their process control blocks and placing them into a real time or active queue based on their
-class and priority level. At the same time, it schedules a process to run for a given quantum every ~0.2s using a message queue, then waits 
-until the child sends a reply message before repeating. Within the instance of user_proc, the child either terminates, runs for all or part
-of its quantum, or becomes blocked, then sends a message to OSS telling what happened and how much time was used. If the process became blocked,
-OSS moves it to a blocked queue, the process enters a loop for 0-2.999 s, then changes its state to ready. In OSS, each time the scheduler is
-called, it checks the blocked queue for any ready processes, moving them to active queue 1.
-	OSS simulates time usage for each of the above actions, keeping track of statistics for each child as well as cumulative statisitcs. It
-runs until 100 child process have been spawned, then until all have terminated, or until 3 real seconds have passed. Finally, it creates an
-output log listing each action taken, and how much time it took, as well as final statistics such as average cpu time per process, average
-wait time, throughput, and proportion of time OS was active. OS is considered active during dispatch, swapping, unblocking, and when a child is
-running. 
+	OSS simulates resource allocation and deadlock prevention in an operating system. It generates 20 resource descriptors,
+15-25% of which are shareable, and each of which have 1-10 instances. It then fork-execs instances of user_proc, up to 18 at a time,
+every 1-500ms (simulated time), until 40 total have been spawned or 5 real life seconds have passed.
+	Each instance of user_proc generates a maximum need for each resource in the range [0, instances], then either requests or 
+releases resources every 1-250ms until it decides to terminate. It communicates requests/releases/termination to OSS via a message
+queue, and concurrency is managed with semaphores.
+	Upon receipt of a request, OSS runs both the banker's algorithm and deadlock detection algorithm, based on allocation, maximum,
+need, and available tables kept in shared memory. If the request would leave the system in a safe state, it is granted, otherwise, the
+request is added to that resource's wait queue, and that child enters a loop until it receives a "wake" message. Any time a process
+releases resources, including termination when it releases all its resources, banker's and deadlock detection algorithms are called
+on each waiting request in each queue. Any request that doesn't produce deadlock is granted, and OSS wakes the requesting process, all
+other requests are put back in a wait queue.
+	Any time OSS gets a request or grants it, it indicates this in output.log. It also periodically displays the allocation table,
+and adds resource-related statistics at the end of the log file. If the verbose option is on, releases, terminations, and blocked requests 
+are also displayed in the log.
 
 
 Installation
@@ -19,11 +24,12 @@ Installation
 
 Invocation
 	From the directory containing the oss and user_proc executables:
-./oss	// runs operating system simulation
+./oss  		// runs operating system simulation
+./oss -v	// runs simulation with verbose output
 
 
 Version Control
-	Git was used for version control. A full change log can be found at https://github.com/adwzq4/OS-Project-4/commits/master
+	Git was used for version control. A full change log can be found at https://github.com/adwzq4/OS-Project-5/commits/master
 
 
 MIT License
@@ -47,3 +53,5 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+

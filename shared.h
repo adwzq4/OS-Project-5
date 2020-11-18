@@ -1,5 +1,5 @@
 // Author: Adam Wilson
-// Date: 10/2/2020
+// Date: 11/17/2020
 
 #include <stdlib.h>
 #include <limits.h>
@@ -56,6 +56,7 @@ struct resourceDescriptor {
 // shared memory segment
 struct shmseg {
 	struct mtime currentTime;
+	struct statistics stats;
 	struct resourceDescriptor descriptors[20];
 	int available[20];
 	int maximum[18][20];
@@ -79,6 +80,7 @@ struct Queue {
 
 void mWait(int*);
 struct mtime addTime(struct mtime, int, long);
+struct mtime subtractTime(struct mtime, struct mtime);
 int compareTimes(struct mtime, struct mtime);
 double timeToDouble(struct mtime);
 struct Queue* createQueue();

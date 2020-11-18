@@ -27,7 +27,18 @@ struct mtime addTime(struct mtime t1, int sec, long ns) {
     return t1;
 }
 
-// compares two mtime structs
+// subtracts the second mtime struct from the first
+struct mtime subtractTime(struct mtime t1, struct mtime t2) {
+    t1.sec -= t2.sec;
+    t1.ns -= t2.ns;
+    if (t1.ns < 0) {
+        t1.ns += BILLION;
+        t1.sec--;
+    }
+    return t1;
+}
+
+// compares two mtime structs, returning 0 if t1 < t2, and 1 if t1 >= t2
 int compareTimes(struct mtime t1, struct mtime t2) {
     if (t1.sec < t2.sec || t1.sec == t2.sec && t1.ns < t2.ns) { return 0; }
     else { return 1; }
